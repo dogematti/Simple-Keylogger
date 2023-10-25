@@ -46,7 +46,7 @@ public partial class MainForm : Form
     }
 
     [STAThread]
-    static Main()
+    static void Main()
     {
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
